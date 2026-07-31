@@ -1,526 +1,483 @@
 import os
-import requests
-import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
-from tkinterdnd2 import DND_FILES, TkinterDnD
-from PIL import Image, ImageTk, ImageDraw, ImageFilter
-from urllib.parse import quote
-import xml.etree.ElementTree as ET
-import shutil
-from ui_styles import configure_styles
+import sys
+from PySide6.QtCore import Qt, Signal, QUrl, QSize
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QRadioButton, QButtonGroup, QGroupBox,
+    QPlainTextEdit, QFileDialog, QMessageBox, QColorDialog,
+    QProgressBar, QFrame, QDialog, QLineEdit, QSizePolicy
+)
+from PySide6.QtGui import (
+    QPainter, QRadialGradient, QColor, QBrush, QPixmap,
+    QIcon, QDesktopServices, QFont, QDragEnterEvent, QDropEvent, QDragLeaveEvent
+)
+from PIL import Image
+
+from ui_styles import get_cyberpunk_qss, COLORS
 from ai_models import AIModels
+from async_workers import AIConversionWorker, SVGGenerationWorker
 
-class LatexConverter:
+
+class ShaderBackgroundWidget(QWidget):
+    """Container widget overriding paintEvent to render a radial gradient glow anchored top-center."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Base background fill (#111112)
+        painter.fillRect(self.rect(), QColor(COLORS['bg_dark']))
+
+        # Top-center radial gradient glow
+        center_x = self.width() / 2.0
+        center_y = 0.0
+        radius = max(self.width(), self.height()) * 0.70
+
+        radial_grad = QRadialGradient(center_x, center_y, radius)
+        # Deep cyberpunk red accent glow transitioning to dark background
+        radial_grad.setColorAt(0.0, QColor(255, 0, 60, 85))
+        radial_grad.setColorAt(0.35, QColor(255, 0, 60, 25))
+        radial_grad.setColorAt(0.75, QColor(255, 0, 60, 5))
+        radial_grad.setColorAt(1.0, QColor(17, 17, 18, 0))
+
+        painter.fillRect(self.rect(), QBrush(radial_grad))
+        painter.end()
+        super().paintEvent(event)
+
+
+class ImageDropZone(QFrame):
+    """Native Drag & Drop interactive zone supporting PNG/JPG/JPEG."""
+    image_selected = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("DropZone")
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setStyleSheet("background: transparent; border: none;")
+
+        self.text_label = QLabel("Drag & Drop Image Here\nor Click to Browse (.png, .jpg, .jpeg)")
+        self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.text_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 13px; font-weight: bold; background: transparent; border: none;")
+
+        layout.addWidget(self.preview_label)
+        layout.addWidget(self.text_label)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                filepath = url.toLocalFile()
+                if filepath.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    event.acceptProposedAction()
+                    self.setProperty("dragActive", True)
+                    self.style().unpolish(self)
+                    self.style().polish(self)
+                    return
+        event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        self.setProperty("dragActive", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def dropEvent(self, event: QDropEvent):
+        self.setProperty("dragActive", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                filepath = url.toLocalFile()
+                if filepath.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    event.acceptProposedAction()
+                    self.image_selected.emit(filepath)
+                    return
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            filepath, _ = QFileDialog.getOpenFileName(
+                self, "Select Image", "", "Image files (*.png *.jpg *.jpeg)"
+            )
+            if filepath:
+                self.image_selected.emit(filepath)
+
+    def set_image_preview(self, filepath: str):
+        pixmap = QPixmap(filepath)
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                QSize(360, 320),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled)
+            filename = os.path.basename(filepath)
+            self.text_label.setText(f"Loaded: {filename}\n(Click or drop to replace)")
+            self.text_label.setStyleSheet(f"color: {COLORS['accent']}; font-size: 12px; font-weight: bold; background: transparent; border: none;")
+
+
+class ApiKeyDialog(QDialog):
+    """Modal Dialog for setting and saving model API Keys."""
+    def __init__(self, model_name: str, current_key: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Set API Key - {model_name}")
+        self.setFixedSize(450, 190)
+        self.model_name = model_name
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        title = QLabel(f"Enter API Key for {model_name}:")
+        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+
+        self.key_input = QLineEdit(current_key)
+        self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_input.setPlaceholderText("Paste API key here...")
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("PrimaryButton")
+        self.save_btn.clicked.connect(self.accept)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(self.save_btn)
+        btn_layout.addWidget(self.cancel_btn)
+
+        layout.addWidget(title)
+        layout.addWidget(self.key_input)
+        layout.addLayout(btn_layout)
+
+    def get_api_key(self) -> str:
+        return self.key_input.text().strip()
+
+
+class LatexConverterApp(QMainWindow):
+    """Main Application Window for PySide6 LaTeX Equation Converter."""
     def __init__(self):
-        self.window = TkinterDnD.Tk()
-        self.window.title("LaTeX Equation Converter")
-        # Start maximized
-        self.window.state('zoomed')
-        
-        # Setup styling
-        self.style = ttk.Style()
-        self.colors = configure_styles(self.style)
-        
-        # --- Gradient background (shader-like) ---
-        self.bg_canvas = tk.Canvas(self.window, highlightthickness=0, bd=0)
-        self.bg_canvas.pack(fill="both", expand=True)
-        self.gradient_img = self.create_gradient_image(1920, 1080, self.colors['bg_dark'], self.colors['accent'])
-        self.gradient_photo = ImageTk.PhotoImage(self.gradient_img)
-        self.bg_canvas.create_image(0, 0, anchor="nw", image=self.gradient_photo)
-        self.window.bind('<Configure>', self._resize_gradient)
-        
-        # Main container frame (will be placed on top of canvas)
-        self.main_container = ttk.Frame(self.bg_canvas, style="Main.TFrame", padding=20)
-        self.bg_canvas.create_window(0, 0, anchor="nw", window=self.main_container, tags="main_frame")
-        
-        # Initialize AI models
+        super().__init__()
+        self.setWindowTitle("LaTeX Equation Converter")
+        self.resize(1100, 750)
+        self.setMinimumSize(900, 600)
+
+        # Initialize AI Models & Business State
         self.ai_models = AIModels()
-        
-        # Set default output directory
         self.output_directory = os.getcwd()
-        
-        # Create UI
-        self.create_widgets()
-        self._resize_gradient()
-        
-    def _resize_gradient(self, event=None):
-        w = self.window.winfo_width()
-        h = self.window.winfo_height()
-        if w < 100 or h < 100:
-            return
-        self.gradient_img = self.create_gradient_image(w, h, self.colors['bg_dark'], self.colors['accent'])
-        self.gradient_photo = ImageTk.PhotoImage(self.gradient_img)
-        self.bg_canvas.config(width=w, height=h)
-        self.bg_canvas.create_image(0, 0, anchor="nw", image=self.gradient_photo)
-        self.bg_canvas.coords("main_frame", 0, 0)
-        self.bg_canvas.itemconfig("main_frame", width=w, height=h)
+        self.current_image_path = None
+        self.selected_color = "#ff003c"  # Default Cyberpunk Red
+        self.active_worker = None
 
-    def create_gradient_image(self, width, height, color1, color2):
-        from PIL import Image, ImageDraw
-        import random
-        base = Image.new('RGB', (width, height), color1)
-        # Vertical gradient
-        top = Image.new('RGB', (width, height), color2)
-        mask = Image.new('L', (width, height))
-        for y in range(height):
-            mask.putpixel((0, y), int(255 * y / height))
-        mask = mask.resize((width, height))
-        base.paste(top, (0, 0), mask)
-        # Radial gradient overlay (shader effect)
-        overlay = Image.new('RGBA', (width, height))
-        draw = ImageDraw.Draw(overlay)
-        max_radius = int(min(width, height) * 0.6)
-        center = (width // 2, int(height * 0.4))
-        for r in range(max_radius, 0, -8):
-            alpha = int(80 * (1 - r / max_radius))
-            fill = (255, 0, 60, alpha)
-            draw.ellipse([
-                center[0] - r, center[1] - r,
-                center[0] + r, center[1] + r
-            ], fill=fill)
-        # Vignette
-        vignette = Image.new('L', (width, height), 0)
-        vdraw = ImageDraw.Draw(vignette)
-        vdraw.ellipse([int(-0.2*width), int(-0.2*height), int(1.2*width), int(1.2*height)], fill=255)
-        vignette = vignette.filter(ImageFilter.GaussianBlur(radius=int(0.2*min(width, height))))
-        overlay.putalpha(vignette)
-        base = base.convert('RGBA')
-        base.alpha_composite(overlay)
-        # Subtle noise
-        noise = Image.effect_noise((width, height), 8)
-        noise = noise.point(lambda x: 80 + x//8)
-        noise = noise.convert('L')
-        noise_img = Image.new('RGBA', (width, height), (0,0,0,0))
-        noise_img.putalpha(noise)
-        base.alpha_composite(noise_img)
-        return base.convert('RGB')
-        
-    def create_widgets(self):
-        # Main container
-        main_container = self.main_container
-        main_container.pack(fill="both", expand=True)
-        
-        # Title
-        title = ttk.Label(main_container, text="LaTeX Equation Converter",
-                         style="Title.TLabel")
-        title.pack(pady=(0, 20))
-        
-        # Controls container for AI model and output directory
-        controls_container = ttk.Frame(main_container)
-        controls_container.pack(fill="x", padx=10, pady=(0, 20))
-        
-        # Model selection (left side)
-        model_frame = ttk.LabelFrame(controls_container, text="Select AI Model", padding=15)
-        model_frame.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
-        model_controls = ttk.Frame(model_frame)
-        model_controls.pack(fill="x")
-        
-        self.model_var = tk.StringVar(value="Gemini")
-        for model in self.ai_models.models.keys():
-            ttk.Radiobutton(model_controls, text=model, variable=self.model_var,
-                          value=model).pack(side="left", padx=20)
-        
-        # API Key button
-        api_key_btn = ttk.Button(model_controls, text="Set API Key",
-                               command=self.show_api_key_dialog,
-                               style="Action.TButton")
-        api_key_btn.pack(side="right", padx=20)
-        
-        # Output directory selection (right side)
-        dir_frame = ttk.LabelFrame(controls_container, text="Output Directory", padding=15)
-        dir_frame.pack(side="right", fill="x", expand=True, padx=(5, 0))
-        
-        dir_controls = ttk.Frame(dir_frame)
-        dir_controls.pack(fill="x")
-        
-        self.dir_label = ttk.Label(dir_controls, text=self.output_directory)
-        self.dir_label.pack(side="left", padx=20)
-        
-        dir_btn = ttk.Button(dir_controls, text="Change Directory",
-                           command=self.select_output_directory,
-                           style="Action.TButton")
-        dir_btn.pack(side="right", padx=20)
-        
-        # Create columns container
-        columns = ttk.Frame(main_container)
-        columns.pack(fill="both", expand=True, padx=10)
-        
-        # Left column (Image)
-        left_col = ttk.Frame(columns)
-        left_col.pack(side="left", fill="both", expand=True, padx=(0, 10))
-        
-        self.setup_image_section(left_col)
-        
-        # Right column (LaTeX + Buttons)
-        right_col = ttk.Frame(columns)
-        right_col.pack(side="right", fill="both", expand=True, padx=(10, 0))
-        
-        self.setup_latex_section(right_col)
-        
-    def setup_image_section(self, parent):
-        img_frame = ttk.LabelFrame(parent, text="Input Image (Drag & Drop or Select)", padding=15)
-        img_frame.pack(fill="both", expand=True)
+        # Build UI Structure
+        self.init_ui()
 
-        # Configure drop zone
-        img_frame.drop_target_register(DND_FILES)
-        img_frame.dnd_bind('<<Drop>>', self.handle_drop)
-        
-        self.img_label = ttk.Label(img_frame, text="Drop an image here or click 'Select Image'", anchor="center")
-        self.img_label.pack(pady=20, fill="both", expand=True)
-        
-        # Also allow dropping on the label itself
-        self.img_label.drop_target_register(DND_FILES)
-        self.img_label.dnd_bind('<<Drop>>', self.handle_drop)
-        
-        select_btn = ttk.Button(img_frame, text="Select Image",
-                              command=self.select_image,
-                              style="Action.TButton")
-        select_btn.pack(pady=10)
-        
-    def setup_latex_section(self, parent):
-        # LaTeX output
-        latex_frame = ttk.LabelFrame(parent, text="LaTeX Code", padding=15)
-        latex_frame.pack(fill="both", expand=True, pady=(0, 20))
-        
-        # Color selection with advanced color picker
-        color_label_frame = ttk.LabelFrame(latex_frame, text="SVG Text Color")
-        color_label_frame.pack(fill="x", pady=(0, 10))
-        
-        color_frame = ttk.Frame(color_label_frame)
-        color_frame.pack(fill="x", padx=5, pady=5)
-        
-        self.color_var = tk.StringVar(value="#ff003c")  # Default: Red
-        
-        def open_advanced_color_picker():
-            import colorsys
-            dialog = tk.Toplevel(self.window)
-            dialog.title("Pick SVG Color")
-            dialog.geometry("550x440")
-            dialog.configure(bg=self.colors['bg_dark'])
-            dialog.transient(self.window)
-            dialog.grab_set()
+        # Check Node.js installation on startup
+        self.verify_node_installed()
 
-            # --- Style all dialog widgets for consistency ---
-            def style_widget(widget):
-                try:
-                    widget.configure(bg=self.colors['bg_dark'])
-                except:
-                    pass
-                for child in getattr(widget, 'winfo_children', lambda:[])():
-                    style_widget(child)
+        # Start Maximized like Tkinter app
+        self.showMaximized()
 
-            # HSV state
-            hsv = [0.0, 1.0, 1.0]  # Default: red
-            def hex_to_hsv(hex_color):
-                hex_color = hex_color.lstrip('#')
-                r, g, b = tuple(int(hex_color[i:i+2], 16)/255 for i in (0, 2, 4))
-                return list(colorsys.rgb_to_hsv(r, g, b))
-            def hsv_to_hex(h, s, v):
-                r, g, b = colorsys.hsv_to_rgb(h, s, v)
-                return '#%02x%02x%02x' % (int(r*255), int(g*255), int(b*255))
-            
-            try:
-                hsv = hex_to_hsv(self.color_var.get())
-            except:
-                pass
+    def init_ui(self):
+        # Central widget with custom shader paint event
+        self.central_widget = ShaderBackgroundWidget()
+        self.setCentralWidget(self.central_widget)
 
-            # SV square
-            sv_size = 240
-            hue_height = 240
-            hue_width = 40
-            sv_canvas = tk.Canvas(dialog, width=sv_size, height=sv_size, highlightthickness=0, bd=0)
-            sv_canvas.grid(row=0, column=0, padx=(24,12), pady=(24,12))
-            # Hue bar
-            hue_canvas = tk.Canvas(dialog, width=hue_width, height=hue_height, highlightthickness=0, bd=0)
-            hue_canvas.grid(row=0, column=1, pady=(24,12))
-            # Preview
-            preview = tk.Label(dialog, width=12, height=2, bg=self.color_var.get(), relief="solid", bd=2)
-            preview.grid(row=0, column=2, padx=(12,24), pady=(24,12))
-            # Hex input
-            hex_var = tk.StringVar(value=self.color_var.get())
-            hex_entry = ttk.Entry(dialog, textvariable=hex_var, width=12, style="TEntry")
-            hex_entry.grid(row=1, column=0, columnspan=2, pady=(0,16), padx=(24,0), sticky="w")
+        main_layout = QVBoxLayout(self.central_widget)
+        main_layout.setContentsMargins(24, 20, 24, 20)
+        main_layout.setSpacing(16)
 
-            # Draw hue bar
-            from PIL import Image, ImageTk
-            hue_img = Image.new('RGB', (1, hue_height))
-            for y in range(hue_height):
-                h = y / hue_height
-                r, g, b = colorsys.hsv_to_rgb(h, 1, 1)
-                hue_img.putpixel((0, y), (int(r*255), int(g*255), int(b*255)))
-            hue_img = hue_img.resize((hue_width, hue_height))
-            hue_photo = ImageTk.PhotoImage(hue_img)
-            hue_canvas.create_image(0, 0, anchor="nw", image=hue_photo)
-            hue_canvas.image = hue_photo
+        # --- 1. Header ---
+        header_label = QLabel("LaTeX Equation Converter")
+        header_label.setObjectName("HeaderTitle")
+        header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(header_label)
 
-            # Draw SV square
-            def update_sv_square():
-                sv_img = Image.new('RGB', (sv_size, sv_size))
-                for x in range(sv_size):
-                    for y in range(sv_size):
-                        s = x / (sv_size-1)
-                        v = 1 - y / (sv_size-1)
-                        r, g, b = colorsys.hsv_to_rgb(hsv[0], s, v)
-                        sv_img.putpixel((x, y), (int(r*255), int(g*255), int(b*255)))
-                sv_photo = ImageTk.PhotoImage(sv_img)
-                sv_canvas.create_image(0, 0, anchor="nw", image=sv_photo)
-                sv_canvas.image = sv_photo
-            update_sv_square()
+        # --- 2. Controls Section (Side-by-side GroupBoxes) ---
+        controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(16)
 
-            # SV square click
-            def on_sv_click(event):
-                x, y = event.x, event.y
-                if 0 <= x < sv_size and 0 <= y < sv_size:
-                    hsv[1] = x / (sv_size-1)
-                    hsv[2] = 1 - y / (sv_size-1)
-                    hex_code = hsv_to_hex(*hsv)
-                    hex_var.set(hex_code)
-                    preview.configure(bg=hex_code)
-            sv_canvas.bind('<Button-1>', on_sv_click)
-            sv_canvas.bind('<B1-Motion>', on_sv_click)
+        # AI Model Selection Box
+        model_box = QGroupBox("Select AI Model")
+        model_layout = QHBoxLayout(model_box)
+        model_layout.setContentsMargins(16, 16, 16, 16)
 
-            # Hue bar click
-            def on_hue_click(event):
-                y = event.y
-                if 0 <= y < hue_height:
-                    hsv[0] = y / hue_height
-                    update_sv_square()
-                    hex_code = hsv_to_hex(*hsv)
-                    hex_var.set(hex_code)
-                    preview.configure(bg=hex_code)
-            hue_canvas.bind('<Button-1>', on_hue_click)
-            hue_canvas.bind('<B1-Motion>', on_hue_click)
+        self.gemini_radio = QRadioButton("Gemini")
+        self.mistral_radio = QRadioButton("Mistral")
+        self.gemini_radio.setChecked(True)
 
-            # Hex input change
-            def on_hex_change(*_):
-                val = hex_var.get()
-                if val.startswith('#') and len(val) == 7:
-                    preview.configure(bg=val)
-                    try:
-                        h, s, v = hex_to_hsv(val)
-                        hsv[0], hsv[1], hsv[2] = h, s, v
-                        update_sv_square()
-                    except:
-                        pass
-            hex_var.trace_add('write', on_hex_change)
+        self.model_button_group = QButtonGroup(self)
+        self.model_button_group.addButton(self.gemini_radio)
+        self.model_button_group.addButton(self.mistral_radio)
 
-            # Save button
-            def save_color():
-                self.color_var.set(hex_var.get())
-                color_preview.configure(bg=hex_var.get())
-                dialog.destroy()
-            save_btn = ttk.Button(dialog, text="Save", command=save_color, style="Action.TButton")
-            save_btn.grid(row=2, column=0, columnspan=2, pady=(0,18), padx=(24,0), sticky="w")
-            # Cancel button
-            cancel_btn = ttk.Button(dialog, text="Cancel", command=dialog.destroy, style="Action.TButton")
-            cancel_btn.grid(row=2, column=2, pady=(0,18), padx=(0,24), sticky="e")
+        api_key_btn = QPushButton("Set API Key")
+        api_key_btn.clicked.connect(self.show_api_key_dialog)
 
-            # --- Style all dialog widgets for consistency ---
-            style_widget(dialog)
+        model_layout.addWidget(self.gemini_radio)
+        model_layout.addWidget(self.mistral_radio)
+        model_layout.addStretch()
+        model_layout.addWidget(api_key_btn)
 
-            # Center the dialog on the main window
-            dialog.update_idletasks()
-            x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (dialog.winfo_width() // 2)
-            y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (dialog.winfo_height() // 2)
-            dialog.geometry(f"+{x}+{y}")
+        # Output Directory Box
+        dir_box = QGroupBox("Output Directory")
+        dir_layout = QHBoxLayout(dir_box)
+        dir_layout.setContentsMargins(16, 16, 16, 16)
 
-            hex_entry.focus_set()
+        self.dir_label = QLabel(self.output_directory)
+        self.dir_label.setStyleSheet("font-size: 12px;")
+        self.dir_label.setToolTip(self.output_directory)
 
-        pick_btn = ttk.Button(color_frame, text="Pick Color", command=open_advanced_color_picker, style="Action.TButton")
-        pick_btn.pack(side="left", padx=(0, 10))
-        
-        color_preview = tk.Label(color_frame, width=3, height=1, bg=self.color_var.get(), relief="solid", bd=2)
-        color_preview.pack(side="left")
-        
-        # Live update for color preview
-        def update_color_preview(*_):
-            color_preview.configure(bg=self.color_var.get())
-        self.color_var.trace_add('write', update_color_preview)
-        
-        # LaTeX text box
-        self.latex_text = tk.Text(latex_frame, height=8,
-                                font=('Consolas', 11),
-                                wrap='word',
-                                bg=self.colors['bg_light'],
-                                fg=self.colors['text'],
-                                insertbackground=self.colors['text'],
-                                selectbackground=self.colors['accent'],
-                                selectforeground='white',
-                                relief='flat',
-                                padx=15,
-                                pady=15)
-        self.latex_text.pack(fill="both", expand=True, pady=10)
-        
-        # Action buttons
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill="x", pady=(0, 10))
-        
-        convert_btn = ttk.Button(btn_frame, text="Convert to LaTeX",
-                               command=self.convert_to_latex,
-                               style="Action.TButton")
-        convert_btn.pack(fill="x", pady=5)
-        
-        generate_btn = ttk.Button(btn_frame, text="Generate SVG",
-                                command=self.generate_svg,
-                                style="Action.TButton")
-        generate_btn.pack(fill="x", pady=5)
-        
-    def select_image(self):
-        file_path = filedialog.askopenfilename(
-            filetypes=[("Image files", "*.png *.jpg *.jpeg")]
+        change_dir_btn = QPushButton("Change Directory")
+        change_dir_btn.clicked.connect(self.select_output_directory)
+
+        dir_layout.addWidget(self.dir_label, stretch=1)
+        dir_layout.addWidget(change_dir_btn)
+
+        controls_layout.addWidget(model_box, stretch=1)
+        controls_layout.addWidget(dir_box, stretch=1)
+        main_layout.addLayout(controls_layout)
+
+        # --- 3. Content Columns (50/50 Horizontal Split) ---
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(20)
+
+        # Left Column: Input Image Drop Zone
+        left_col = QVBoxLayout()
+        left_col.setSpacing(12)
+
+        image_group = QGroupBox("Input Image (Drag & Drop or Select)")
+        image_box_layout = QVBoxLayout(image_group)
+        image_box_layout.setContentsMargins(16, 20, 16, 16)
+
+        self.drop_zone = ImageDropZone()
+        self.drop_zone.image_selected.connect(self.on_image_selected)
+
+        select_btn = QPushButton("Select Image")
+        select_btn.clicked.connect(self.select_image_dialog)
+
+        image_box_layout.addWidget(self.drop_zone, stretch=1)
+        image_box_layout.addWidget(select_btn)
+        left_col.addWidget(image_group)
+
+        # Right Column: LaTeX Output & Actions
+        right_col = QVBoxLayout()
+        right_col.setSpacing(12)
+
+        latex_group = QGroupBox("LaTeX Code")
+        latex_box_layout = QVBoxLayout(latex_group)
+        latex_box_layout.setContentsMargins(16, 16, 16, 16)
+        latex_box_layout.setSpacing(12)
+
+        # Color Selector Row
+        color_layout = QHBoxLayout()
+        color_layout.setSpacing(12)
+
+        color_label = QLabel("SVG Text Color:")
+        color_label.setStyleSheet("font-weight: bold;")
+
+        self.pick_color_btn = QPushButton("Pick Color")
+        self.pick_color_btn.clicked.connect(self.open_color_dialog)
+
+        self.color_preview = QFrame()
+        self.color_preview.setFixedSize(28, 28)
+        self.color_preview.setStyleSheet(f"background-color: {self.selected_color}; border: 1px solid #ffffff; border-radius: 4px;")
+
+        self.color_hex_label = QLabel(self.selected_color)
+        self.color_hex_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-family: monospace;")
+
+        color_layout.addWidget(color_label)
+        color_layout.addWidget(self.pick_color_btn)
+        color_layout.addWidget(self.color_preview)
+        color_layout.addWidget(self.color_hex_label)
+        color_layout.addStretch()
+
+        latex_box_layout.addLayout(color_layout)
+
+        # LaTeX Code Text Area
+        self.latex_editor = QPlainTextEdit()
+        self.latex_editor.setObjectName("MonospaceEditor")
+        self.latex_editor.setPlaceholderText("Extracted LaTeX code will appear here after conversion...")
+
+        latex_box_layout.addWidget(self.latex_editor, stretch=1)
+
+        # Status Label & Progress Bar
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("StatusLabel")
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+
+        latex_box_layout.addWidget(self.status_label)
+        latex_box_layout.addWidget(self.progress_bar)
+
+        right_col.addWidget(latex_group, stretch=1)
+
+        # Action Buttons
+        self.convert_btn = QPushButton("Convert to LaTeX")
+        self.convert_btn.setObjectName("PrimaryButton")
+        self.convert_btn.clicked.connect(self.convert_to_latex)
+
+        self.generate_btn = QPushButton("Generate SVG")
+        self.generate_btn.setObjectName("SecondaryButton")
+        self.generate_btn.clicked.connect(self.generate_svg)
+
+        right_col.addWidget(self.convert_btn)
+        right_col.addWidget(self.generate_btn)
+
+        content_layout.addLayout(left_col, stretch=1)
+        content_layout.addLayout(right_col, stretch=1)
+        main_layout.addLayout(content_layout, stretch=1)
+
+    # --- Event Handlers & Slot Methods ---
+    def get_selected_model_name(self) -> str:
+        return "Gemini" if self.gemini_radio.isChecked() else "Mistral"
+
+    def select_image_dialog(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "", "Image files (*.png *.jpg *.jpeg)"
         )
-        self.process_image(file_path)
+        if filepath:
+            self.on_image_selected(filepath)
 
-    def handle_drop(self, event):
-        file_path = event.data.strip()
-        if file_path.startswith('{') and file_path.endswith('}'):
-            file_path = file_path[1:-1]
-        
-        if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-            self.process_image(file_path)
-        else:
-            messagebox.showwarning("Invalid File", "Please drop a valid image file (PNG, JPG, JPEG).")
+    def on_image_selected(self, filepath: str):
+        self.current_image_path = filepath
+        self.drop_zone.set_image_preview(filepath)
+        self.status_label.setText(f"Loaded image: {os.path.basename(filepath)}")
 
-    def process_image(self, file_path):
-        if file_path:
-            self.current_image_path = file_path
-            img = Image.open(file_path)
-            img.thumbnail((400, 400))
-            photo = ImageTk.PhotoImage(img)
-            self.img_label.configure(image=photo, text="", anchor="center")
-            self.img_label.image = photo
-            
-    def convert_to_latex(self):
-        if not hasattr(self, 'current_image_path'):
-            messagebox.showwarning("Warning", "Please select an image first!")
-            return
-            
-        try:
-            selected_model = self.model_var.get()
-            
-            if selected_model == "Gemini":
-                latex_code = self.ai_models.use_gemini(self.current_image_path)
-            else:
-                latex_code = self.ai_models.use_mistral(self.current_image_path)
-            
-            self.latex_text.delete(1.0, tk.END)
-            self.latex_text.insert(tk.END, latex_code)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to convert image: {str(e)}")
-        
     def select_output_directory(self):
-        directory = filedialog.askdirectory()
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory", self.output_directory)
         if directory:
             self.output_directory = directory
-            self.dir_label.configure(text=directory)
-    
-    def generate_svg(self):
-        if not hasattr(self, 'current_image_path'):
-            messagebox.showwarning("Warning", "Please select an image first!")
-            return
-            
-        latex_code = self.latex_text.get(1.0, tk.END).strip()
-        if not latex_code:
-            messagebox.showwarning("Warning", "No LaTeX code to convert!")
-            return
-            
-        try:
-            # Create output folder
-            base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
-            folder_name = os.path.join(self.output_directory, f"{base_name}_latex")
-            if not os.path.exists(folder_name):
-                os.makedirs(folder_name)
-            
-            # Add color to LaTeX code
-            color = self.color_var.get()
-            def hex_to_rgb_floats(hex_color):
-                hex_color = hex_color.lstrip('#')
-                r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-                return r/255, g/255, b/255
-            r, g, b = hex_to_rgb_floats(color)
-            
-            cleaned_latex = latex_code.strip()
-            if cleaned_latex.startswith('{') and cleaned_latex.endswith('}'):
-                cleaned_latex = cleaned_latex[1:-1].strip()
-                
-            colored_latex = f"\\color[rgb]{{{r:.3f},{g:.3f},{b:.3f}}} {cleaned_latex}"
-            
-            # FIXED: Properly URL encode latex string for CodeCogs
-            encoded_latex = quote(colored_latex, safe='')
-            svg_url = f"[https://latex.codecogs.com/svg.latex](https://latex.codecogs.com/svg.latex)?{encoded_latex}"
-            
-            response = requests.get(svg_url)
-            # Verify valid response and ensure CodeCogs did not return an error page/SVG
-            if response.status_code == 200 and not (b"Error" in response.content and b"svg" not in response.content):
-                original_svg_path = os.path.join(folder_name, "equation.svg")
-                with open(original_svg_path, 'wb') as f:
-                    f.write(response.content)
-                
-                os.startfile(folder_name)
-                messagebox.showinfo("Success", f"SVG images saved in '{folder_name}' folder!")
-            else:
-                messagebox.showerror("Error", "CodeCogs failed to render this LaTeX syntax.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save SVG: {str(e)}")
+            self.dir_label.setText(directory)
+            self.dir_label.setToolTip(directory)
+
+    def open_color_dialog(self):
+        color = QColorDialog.getColor(QColor(self.selected_color), self, "Select SVG Text Color")
+        if color.isValid():
+            self.selected_color = color.name()
+            self.color_preview.setStyleSheet(f"background-color: {self.selected_color}; border: 1px solid #ffffff; border-radius: 4px;")
+            self.color_hex_label.setText(self.selected_color)
 
     def show_api_key_dialog(self):
-        dialog = tk.Toplevel(self.window)
-        dialog.title("Set API Key")
-        dialog.geometry("400x200")
-        dialog.transient(self.window)
-        dialog.grab_set()
-        
-        # Configure dialog styling
-        dialog.configure(bg=self.colors['bg_dark'])
-        
-        # Create and pack widgets
-        content_frame = ttk.Frame(dialog, style="Main.TFrame", padding=20)
-        content_frame.pack(fill="both", expand=True)
-        
-        selected_model = self.model_var.get()
-        
-        # Label
-        ttk.Label(content_frame, 
-                 text=f"Enter API Key for {selected_model}:",
-                 style="TLabel").pack(pady=(0, 10))
-        
-        # Entry field
-        api_key = tk.StringVar(value=self.ai_models.models[selected_model]["api_key"])
-        entry = ttk.Entry(content_frame, textvariable=api_key, width=40, style="TEntry")
-        entry.pack(pady=(0, 20))
-        
-        # Buttons frame
-        btn_frame = ttk.Frame(content_frame)
-        btn_frame.pack(fill="x")
-        
-        def save_key():
-            self.ai_models.update_api_key(selected_model, api_key.get())
-            dialog.destroy()
-        
-        # Save button
-        save_btn = ttk.Button(btn_frame, text="Save",
-                            command=save_key,
-                            style="Action.TButton")
-        save_btn.pack(side="left", padx=5)
-        
-        # Cancel button
-        cancel_btn = ttk.Button(btn_frame, text="Cancel",
-                              command=dialog.destroy,
-                              style="Action.TButton")
-        cancel_btn.pack(side="right", padx=5)
-        
-        # Center the dialog on the main window
-        dialog.update_idletasks()
-        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        
-        entry.focus_set()
+        model_name = self.get_selected_model_name()
+        current_key = self.ai_models.models[model_name]["api_key"]
+        dialog = ApiKeyDialog(model_name, current_key, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_key = dialog.get_api_key()
+            self.ai_models.update_api_key(model_name, new_key)
+            QMessageBox.information(self, "Success", f"API Key for {model_name} updated successfully.")
 
-    def run(self):
-        self.window.mainloop()
+    def set_loading_state(self, is_loading: bool, message: str = ""):
+        self.convert_btn.setEnabled(not is_loading)
+        self.generate_btn.setEnabled(not is_loading)
+        self.pick_color_btn.setEnabled(not is_loading)
+
+        if is_loading:
+            self.status_label.setText(message)
+            self.progress_bar.setRange(0, 0)  # Indeterminate animation
+        else:
+            self.status_label.setText(message or "Ready")
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+
+    # --- Non-blocking Async Conversion & SVG Generation ---
+    def convert_to_latex(self):
+        if not self.current_image_path:
+            QMessageBox.warning(self, "Warning", "Please select an image first!")
+            return
+
+        model_name = self.get_selected_model_name()
+        self.set_loading_state(True, f"Converting image with {model_name}...")
+
+        self.active_worker = AIConversionWorker(self.ai_models, model_name, self.current_image_path)
+        self.active_worker.success_signal.connect(self.on_conversion_success)
+        self.active_worker.error_signal.connect(self.on_conversion_error)
+        self.active_worker.finished_signal.connect(lambda: self.set_loading_state(False))
+        self.active_worker.start()
+
+    def on_conversion_success(self, latex_code: str):
+        self.latex_editor.setPlainText(latex_code)
+        self.status_label.setText("Conversion complete!")
+
+    def on_conversion_error(self, error_msg: str):
+        QMessageBox.critical(self, "Error", f"Failed to convert image: {error_msg}")
+        self.status_label.setText("Conversion failed.")
+
+    def check_node_installed(self) -> bool:
+        """Verify if Node.js is installed on the host system."""
+        try:
+            import subprocess
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            res = subprocess.run(["node", "-v"], capture_output=True, text=True, creationflags=creationflags)
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def verify_node_installed(self) -> bool:
+        if not self.check_node_installed():
+            QMessageBox.critical(
+                self,
+                "Node.js Required",
+                "Node.js is not installed or not found in your system PATH.\n\n"
+                "MathJax rendering requires Node.js to generate SVGs locally and offline.\n"
+                "Please download and install Node.js from https://nodejs.org/"
+            )
+            return False
+        return True
+
+    def generate_svg(self):
+        if not self.verify_node_installed():
+            return
+
+        if not self.current_image_path:
+            QMessageBox.warning(self, "Warning", "Please select an image first!")
+            return
+
+        latex_code = self.latex_editor.toPlainText().strip()
+        if not latex_code:
+            QMessageBox.warning(self, "Warning", "No LaTeX code to convert!")
+            return
+
+        self.set_loading_state(True, "Rendering SVG locally via MathJax...")
+
+        self.active_worker = SVGGenerationWorker(
+            latex_code, self.selected_color, self.output_directory, self.current_image_path
+        )
+        self.active_worker.success_signal.connect(self.on_svg_success)
+        self.active_worker.error_signal.connect(self.on_svg_error)
+        self.active_worker.finished_signal.connect(lambda: self.set_loading_state(False))
+        self.active_worker.start()
+
+    def on_svg_success(self, folder_name: str):
+        self.status_label.setText("SVG generated successfully!")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder_name))
+        QMessageBox.information(self, "Success", f"SVG saved in:\n{folder_name}")
+
+    def on_svg_error(self, error_msg: str):
+        QMessageBox.critical(self, "Error", error_msg)
+        self.status_label.setText("SVG generation failed.")
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(get_cyberpunk_qss())
+    window = LatexConverterApp()
+    window.show()
+    sys.exit(app.exec())
+
 
 if __name__ == "__main__":
-    app = LatexConverter()
-    app.run()
+    main()

@@ -57,11 +57,11 @@ class AIModels:
         model = genai.GenerativeModel(model_name=self.models["Gemini"]["name"])
         
         prompt = (
-            "Extract the text and math from this image into a single, valid CodeCogs-compatible LaTeX snippet.\n"
+            "Extract the text and math from this image into a single, valid Standard, clean AMS-LaTeX snippet compatible with MathJax.\n"
             "STRICT RULES:\n"
             "1. DO NOT use document wrappers or structural commands (NO \\documentclass, NO \\begin{document}, NO \\section, NO \\subsection, NO \\begin{itemize}).\n"
-            "2. Wrap all multi-line structures, titles, and text lists inside a single \\begin{aligned} ... \\end{aligned} block.\n"
-            "3. Convert standard text, headings, bullet points, and words into math-mode text equivalents using \\text{...}, \\mathbf{...}, \\bullet, and \\quad.\n"
+            "2. Wrap all multi-line structures, titles, and text lists inside a single \\begin{aligned} ... \\end{aligned} block or standard AMS environments.\n"
+            "3. Convert standard text, headings, bullet points, and words into plain text wrapped inside \\text{...}.\n"
             "4. Return ONLY raw LaTeX code. NO markdown formatting, NO code blocks (do not wrap in ``` or ```latex), and NO explanations or extra text."
         )
         
@@ -91,15 +91,15 @@ class AIModels:
             encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
 
         client = OpenAI(
-            base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
+            base_url="https://openrouter.ai/api/v1",
             api_key=self.models["Mistral"]["api_key"],
         )
         
         prompt = (
-            "Extract the text and math from this image into CodeCogs-compatible LaTeX.\n"
+            "Extract the text and math from this image into Standard, clean AMS-LaTeX compatible with MathJax.\n"
             "STRICT RULES:\n"
             "1. DO NOT use document tags (NO \\documentclass, NO \\begin{document}, NO \\begin{itemize}, NO \\section).\n"
-            "2. Wrap multi-line layouts in \\begin{aligned} ... \\end{aligned} and wrap plain text inside \\text{...}.\n"
+            "2. Wrap multi-line layouts in \\begin{aligned} ... \\end{aligned} or standard AMS environments, and wrap plain text inside \\text{...}.\n"
             "3. Output ONLY pure LaTeX code. NO markdown, NO ``` block wrappers, NO commentary."
         )
         

@@ -1,0 +1,38 @@
+# Python & Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js & NPM Dependencies
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Sensitive Data / API Keys
+api_keys.txt
+*.key
+.env
+
+# Generated Output Folders & Temporary Test Images
+*_latex/
+*.svg
+*.png
+*.jpg
+*.jpeg
+!Hard Math Equation.png
+
+# IDE & Operating System Artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

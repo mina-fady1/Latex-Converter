@@ -1,0 +1,13 @@
+{
+  "name": "latex-converter-mathjax",
+  "version": "1.0.0",
+  "description": "Local offline MathJax SVG renderer for LaTeX Converter",
+  "main": "render_mathjax.js",
+  "type": "commonjs",
+  "scripts": {
+    "render": "node render_mathjax.js"
+  },
+  "dependencies": {
+    "mathjax": "^3.2.2"
+  }
+}
