@@ -1,0 +1,6 @@
+# Core dependencies
+google-generativeai  # For Gemini Vision API
+openai              # For OpenRouter/Mistral API integration
+Pillow              # For image processing and previews
+requests            # For SVG generation
+tkinterdnd2         # For drag-and-drop support
