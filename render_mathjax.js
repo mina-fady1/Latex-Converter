@@ -86,14 +86,30 @@ async function render() {
         });
 
         // 2. CRITICAL FOR POWERPOINT UNGROUPING & SHAPE OUTLINES:
-        // Set stroke="none" stroke-width="0" stroke-opacity="0" directly on <path> and <rect> elements.
+        // Set stroke="none" stroke-width="0" stroke-opacity="0" directly on <path> and solid <rect> elements.
         // PowerPoint's shape converter automatically adds a 0.75pt/1pt outline if stroke attributes are absent or inherited.
         // Explicitly tagging stroke="none" stroke-width="0" stroke-opacity="0" instructs PowerPoint to import shapes with "No Line" (0pt border).
         svgOutput = svgOutput.replace(/stroke="currentColor"/g, 'stroke="none"');
         svgOutput = svgOutput.replace(/fill="currentColor"/g, `fill="${color}"`);
 
         svgOutput = svgOutput.replace(/<path /g, `<path stroke="none" stroke-width="0" stroke-opacity="0" fill="${color}" `);
-        svgOutput = svgOutput.replace(/<rect /g, `<rect stroke="none" stroke-width="0" stroke-opacity="0" fill="${color}" `);
+        
+        // Handle <rect> tags appropriately:
+        // - Enclosure boxes (e.g. \boxed, menclose) have fill="none" and stroke-width. They MUST have stroke="${color}" and keep fill="none" without duplicate attributes.
+        // - Solid bars (fraction lines, square root vinculum) have no existing fill/stroke attributes, so set fill="${color}" and stroke="none".
+        svgOutput = svgOutput.replace(/<rect\b([^>]*)>/g, (match, attrs) => {
+            if (attrs.includes('fill="none"')) {
+                let newAttrs = attrs;
+                if (!newAttrs.includes('stroke=')) {
+                    newAttrs = ` stroke="${color}" stroke-opacity="1"` + newAttrs;
+                } else {
+                    newAttrs = newAttrs.replace(/stroke="[^"]*"/, `stroke="${color}"`);
+                }
+                return `<rect${newAttrs}>`;
+            } else {
+                return `<rect stroke="none" stroke-width="0" stroke-opacity="0" fill="${color}"${attrs}>`;
+            }
+        });
 
         // Apply color styles to svg root
         if (svgOutput.includes('style="')) {
