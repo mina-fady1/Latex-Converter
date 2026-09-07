@@ -335,6 +335,11 @@ class AIModels:
                         candidate_count=1,
                         max_output_tokens=MAX_OUTPUT_TOKENS,
                         response_mime_type="text/plain",
+                        # This request has no tools. Disable the SDK's default
+                        # AFC loop and its direct-generate warning.
+                        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                            disable=True,
+                        ),
                         # Low thinking balances speed with difficult equation reading.
                         thinking_config=genai_types.ThinkingConfig(
                             thinking_level=genai_types.ThinkingLevel.LOW,

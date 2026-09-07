@@ -109,7 +109,6 @@ def get_cyberpunk_qss() -> str:
     QPushButton#PrimaryButton:hover {{
         background-color: {COLORS['accent_hover']};
         border-color: {COLORS['accent_hover']};
-        box-shadow: 0 0 10px {COLORS['accent_hover']};
     }}
     
     QPushButton#PrimaryButton:pressed {{
