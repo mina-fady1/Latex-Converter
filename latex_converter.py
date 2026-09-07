@@ -389,7 +389,8 @@ class LatexConverterApp(QMainWindow):
             self.status_label.setText(message)
             self.progress_bar.setRange(0, 0)  # Indeterminate animation
         else:
-            self.status_label.setText(message or "Ready")
+            # Keep a final success/error message visible after the worker ends.
+            self.status_label.setText(message or self.status_label.text() or "Ready")
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
 
@@ -405,16 +406,35 @@ class LatexConverterApp(QMainWindow):
         self.active_worker = AIConversionWorker(self.ai_models, model_name, self.current_image_path)
         self.active_worker.success_signal.connect(self.on_conversion_success)
         self.active_worker.error_signal.connect(self.on_conversion_error)
+        self.active_worker.progress_signal.connect(self.on_conversion_progress)
         self.active_worker.finished_signal.connect(lambda: self.set_loading_state(False))
         self.active_worker.start()
 
-    def on_conversion_success(self, latex_code: str):
+    def on_conversion_progress(self, message: str):
+        self.status_label.setText(message)
+
+    def on_conversion_success(self, latex_code: str, timings: dict):
         self.latex_editor.setPlainText(latex_code)
-        self.status_label.setText("Conversion complete!")
+        provider = timings.get("provider", "AI")
+        total = timings.get("total_seconds", 0.0)
+        prepare = timings.get("prepare_seconds", 0.0)
+        api = timings.get("api_seconds", 0.0)
+        parse = timings.get("parse_seconds", 0.0)
+        attempts = timings.get("attempts", 1)
+        retry_note = f", {attempts} attempts" if attempts > 1 else ""
+        self.status_label.setText(
+            f"Conversion complete in {total:.1f}s "
+            f"(prep {prepare:.1f}s, {provider} {api:.1f}s, parse {parse:.1f}s{retry_note})."
+        )
 
     def on_conversion_error(self, error_msg: str):
         QMessageBox.critical(self, "Error", f"Failed to convert image: {error_msg}")
-        self.status_label.setText("Conversion failed.")
+        self.status_label.setText("Conversion failed — see the error message for details.")
+
+    def closeEvent(self, event):
+        """Release persistent AI HTTP connections during application shutdown."""
+        self.ai_models.close()
+        super().closeEvent(event)
 
     def check_node_installed(self) -> bool:
         """Verify if Node.js is installed on the host system."""

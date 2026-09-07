@@ -5,8 +5,9 @@ from PySide6.QtCore import QThread, Signal
 
 class AIConversionWorker(QThread):
     """Async worker thread for AI model LaTeX conversion."""
-    success_signal = Signal(str)
+    success_signal = Signal(str, dict)
     error_signal = Signal(str)
+    progress_signal = Signal(str)
     finished_signal = Signal()
 
     def __init__(self, ai_models, model_name: str, image_path: str):
@@ -16,14 +17,23 @@ class AIConversionWorker(QThread):
         self.image_path = image_path
 
     def run(self):
+        import time
+        started_at = time.perf_counter()
         try:
             if self.model_name == "Gemini":
-                latex_code = self.ai_models.use_gemini(self.image_path)
+                latex_code, timings = self.ai_models.use_gemini(
+                    self.image_path,
+                    self.progress_signal.emit,
+                )
             else:
-                latex_code = self.ai_models.use_mistral(self.image_path)
-            self.success_signal.emit(latex_code)
+                latex_code, timings = self.ai_models.use_mistral(
+                    self.image_path,
+                    self.progress_signal.emit,
+                )
+            self.success_signal.emit(latex_code, timings)
         except Exception as e:
-            self.error_signal.emit(str(e))
+            elapsed = time.perf_counter() - started_at
+            self.error_signal.emit(f"{e} (total elapsed: {elapsed:.1f}s)")
         finally:
             self.finished_signal.emit()
 

@@ -13,10 +13,12 @@ A high-performance desktop application built with **PySide6 (Qt for Python)**, *
 ## Key Features
 
 - **AI-Powered Image-to-LaTeX Extraction**:
-  - **Google Gemini**: Uses `gemini-3.6-flash` via the official Google Generative AI SDK.
+  - **Google Gemini**: Uses `gemini-3.6-flash` via the supported Google Gen AI SDK.
   - **Mistral AI**: Uses `mistralai/mistral-small-3.1-24b-instruct:free` via OpenRouter (OpenAI client format).
   - Automatically recognizes multi-line equations, matrices, integrals, fractions, summations, aligned systems, and Greek symbols.
   - Strict system prompting prevents document wrapper boilerplate (`\documentclass`, `\begin{document}`), delivering clean MathJax-compatible snippets.
+  - Normalizes uploads to a bounded 2048px JPEG before transmission, reuses provider clients, and reports preparation, API, and parsing timings in the status line.
+  - Gemini requests use a 60-second per-attempt limit and one visible retry for transient provider failures.
 - **Fast, 100% Local & Offline MathJax Renderer**:
   - Subprocess execution (`render_mathjax.js`) utilizing local Node.js and MathJax v3.
   - Complete TeX package support (`amsmath`, `amssymb`, `cancel`, `textmacros`, `mhchem`, etc.).
@@ -158,4 +160,3 @@ Latex-Converter/
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-
