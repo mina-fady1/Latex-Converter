@@ -1,6 +1,6 @@
 import os
 import sys
-from PySide6.QtCore import Qt, Signal, QUrl, QSize
+from PySide6.QtCore import Qt, Signal, QUrl, QSize, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QRadioButton, QButtonGroup, QGroupBox,
@@ -484,7 +484,13 @@ class LatexConverterApp(QMainWindow):
     def on_svg_success(self, folder_name: str):
         self.status_label.setText("SVG generated successfully!")
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder_name))
-        QMessageBox.information(self, "Success", f"SVG saved in:\n{folder_name}")
+        success_dialog = QMessageBox(self)
+        success_dialog.setIcon(QMessageBox.Icon.Information)
+        success_dialog.setWindowTitle("Success")
+        success_dialog.setText(f"SVG saved in:\n{folder_name}")
+        success_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        QTimer.singleShot(5000, success_dialog.accept)
+        success_dialog.exec()
 
     def on_svg_error(self, error_msg: str):
         QMessageBox.critical(self, "Error", error_msg)
