@@ -13,27 +13,33 @@ A high-performance desktop application built with **PySide6 (Qt for Python)**, *
 ## Key Features
 
 - **AI-Powered Image-to-LaTeX Extraction**:
-  - **Google Gemini**: Uses `gemini-3.6-flash` via the supported Google Gen AI SDK.
-  - **Mistral AI**: Uses `mistralai/mistral-small-3.1-24b-instruct:free` via OpenRouter (OpenAI client format).
-  - Automatically recognizes multi-line equations, matrices, integrals, fractions, summations, aligned systems, and Greek symbols.
-  - Strict system prompting prevents document wrapper boilerplate (`\documentclass`, `\begin{document}`), delivering clean MathJax-compatible snippets.
-  - Normalizes uploads to a bounded 2048px JPEG before transmission, reuses provider clients, and reports preparation, API, and parsing timings in the status line.
-  - Gemini requests use a 60-second per-attempt limit and one visible retry for transient provider failures.
+  - **Google Gemini**: Uses `gemini-3.8-flash` via the official `google-genai` SDK with low-latency thinking configuration (`ThinkingLevel.LOW`) and automatic function calling disabled.
+  - **Mistral AI**: Uses `mistralai/mistral-small-3.1-24b-instruct:free` via OpenRouter (OpenAI-compatible client).
+  - **Intelligent Preprocessing**: Automatically handles EXIF orientation, composites transparent PNGs over a clean white background, scales within a 2048px bounding box, and compresses to a high-quality JPEG under 2 MB to ensure rapid API transmission.
+  - **Resilient Networking & Telemetry**: 60-second per-attempt timeout, automatic single retry on transient network/provider errors (HTTP 408, 429, 500–504, transport errors), and live status bar updates detailing preparation, API response, and parsing elapsed times.
+  - **Strict Output Formatting**: System prompts enforce pure AMS-LaTeX snippets (using `aligned` for multi-line systems and `\text{...}` for prose) and strip preamble wrappers (`\documentclass`, `\begin{document}`) or markdown code fences.
+  - **Clean Connection Teardown**: Automatically closes persistent HTTP client sessions when closing the application.
+
 - **Fast, 100% Local & Offline MathJax Renderer**:
   - Subprocess execution (`render_mathjax.js`) utilizing local Node.js and MathJax v3.
-  - Complete TeX package support (`amsmath`, `amssymb`, `cancel`, `textmacros`, `mhchem`, etc.).
+  - Comprehensive TeX package support (`amsmath`, `amssymb`, `cancel`, `textmacros`, `mhchem`, and all standard MathJax TeX extensions).
   - Zero external HTTP dependencies for LaTeX-to-SVG rendering.
+
 - **Optimized for Microsoft PowerPoint Vector Shapes**:
-  - Renders with `fontCache: 'none'` to embed direct `<path>` and `<rect>` vector geometries rather than `<use>` references.
+  - Renders with `fontCache: 'none'` to embed direct `<path>` and `<rect>` vector geometries rather than `<use>` glyph references.
   - Converts sizing units from `ex` to standard `px` dimensions (16px base scale).
-  - Explicitly injects zero-stroke attributes (`stroke="none" stroke-width="0" stroke-opacity="0"`) so converted PowerPoint shapes import with sharp, clean edges and no unwanted thick default borders.
+  - Explicitly injects zero-stroke attributes (`stroke="none" stroke-width="0" stroke-opacity="0"`) on math glyphs and solid bars (fraction lines, radical vinculums) so converted PowerPoint shapes import with sharp, clean edges and no unwanted thick default borders.
+  - Differentiates enclosure boxes (e.g., `\boxed{...}`, `\menclose{...}`), preserving visible colored stroke outlines without duplicate or conflicting fill styles.
   - Outputs standalone SVGs with standard XML declaration headers.
+
 - **Cyberpunk Dark Theme UI**:
   - Custom radial gradient shader glow background anchored top-center.
   - Interactive **Drag & Drop** drop zone supporting `.png`, `.jpg`, and `.jpeg` images.
-  - Live color picker with dynamic hex preview and real-time color badge.
+  - Live color picker with dynamic hex preview and real-time color badge (defaults to `#ff003c`).
+  - Monospace LaTeX editor allowing full manual review and edits before SVG compilation.
   - Non-blocking asynchronous multithreading (`QThread`) keeping the UI responsive during AI extraction and SVG compilation.
-  - Local API key persistence in `api_keys.txt`.
+  - Automatic output directory reveal and a non-intrusive 5-second auto-dismissing success dialog upon SVG generation.
+  - Local API key persistence in `api_keys.txt` (excluded from Git).
 
 ---
 
@@ -102,14 +108,14 @@ python latex_converter.py
    - Keys are securely stored locally in `api_keys.txt` (which is excluded from Git).
 2. **Load an Equation Image**:
    - Drag and drop any `.png`, `.jpg`, or `.jpeg` file directly onto the drop zone, or click **Select Image** / drop zone to browse.
-   - A sample test image is provided in the root directory (`Hard Math Equation.png`) and in `screenshots/test.jpeg`.
+   - Sample test images are provided in the root directory (`Hard Math Equation.png`) and in `screenshots/` (`1.jpeg` through `6.jpeg`).
 3. **Convert Image to LaTeX**:
    - Click **Convert to LaTeX**.
-   - The AI worker extracts the equation and displays the editable AMS-LaTeX code in the central editor.
+   - The AI worker extracts the equation and displays the editable AMS-LaTeX code in the central editor. The status bar will show step-by-step progress and timing metrics.
 4. **Choose SVG Text Color & Generate**:
    - Click **Pick Color** to choose any custom accent color for the SVG math symbols (defaults to `#ff003c`).
    - Click **Generate SVG**.
-   - The app compiles the SVG locally using MathJax, saves it to `{output_directory}/{image_name}_latex/equation.svg`, and opens the output folder automatically.
+   - The app compiles the SVG locally using MathJax, saves it to `{output_directory}/{image_name}_latex/equation.svg`, opens the output folder in your file explorer, and displays a confirmation dialog that automatically dismisses after 5 seconds.
 
 ---
 
@@ -128,17 +134,18 @@ To convert your generated SVG into editable, high-resolution Microsoft PowerPoin
 
 ```
 Latex-Converter/
-├── latex_converter.py     # Main PySide6 application window and GUI logic
-├── main_app.py            # Main application entry point
-├── ai_models.py           # Gemini & Mistral (OpenRouter) API integrations
-├── async_workers.py       # QThread background workers for AI calls & Node.js subprocess
+├── latex_converter.py     # Main PySide6 application window, widgets, and GUI logic
+├── main_app.py            # Application entry point
+├── ai_models.py           # Gemini (gemini-3.8-flash) & Mistral (OpenRouter) integrations
+├── async_workers.py       # QThread background workers for non-blocking AI calls & SVG rendering
 ├── ui_styles.py           # Cyberpunk dark theme stylesheet (QSS) & color palette
 ├── render_mathjax.js      # Local Node.js MathJax TeX-to-SVG rendering engine
-├── package.json           # Node.js manifest & MathJax dependency
-├── requirements.txt       # Python dependencies (PySide6, google-generativeai, openai, Pillow, requests)
-├── api_keys.txt           # Local API key storage (auto-generated)
-├── Hard Math Equation.png # Sample test image
-├── screenshots/           # Test assets & sample images
+├── package.json           # Node.js manifest & MathJax dependencies
+├── package-lock.json      # Locked Node.js dependency tree
+├── requirements.txt       # Python dependencies (PySide6, google-genai, openai, Pillow, requests)
+├── api_keys.txt           # Local API key storage (auto-generated, gitignored)
+├── Hard Math Equation.png # Sample root test equation image
+├── screenshots/           # Sample test equation images (1.jpeg - 6.jpeg)
 ├── .gitignore             # Git exclusion rules
 └── README.md              # Project documentation
 ```
@@ -154,9 +161,11 @@ Latex-Converter/
   - Run `npm install` inside the project root directory so `node_modules/mathjax` is installed.
 - **API Key Errors**:
   - Verify that your Gemini key is active in Google AI Studio or your OpenRouter key has access to the Mistral model.
+- **LaTeX Syntax Errors during SVG Generation**:
+  - If MathJax reports invalid LaTeX syntax, inspect the code in the monospace editor to ensure braces and environments (such as `\begin{aligned}...\end{aligned}`) are balanced.
 
 ---
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License.
