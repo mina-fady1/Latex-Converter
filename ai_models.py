@@ -6,11 +6,14 @@ import base64
 import io
 import logging
 import os
+import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter, sleep
 from typing import Callable
 
+from dotenv import load_dotenv, set_key
 from google import genai
 from google.genai import types as genai_types
 from openai import OpenAI
@@ -19,11 +22,37 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 LOGGER = logging.getLogger(__name__)
 
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+ENV_EXAMPLE_PATH = Path(__file__).resolve().parent / ".env.example"
+
+MODEL_ENV_VARS: dict[str, tuple[str, ...]] = {
+    "Gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI", "Gemini"),
+    "Mistral": ("MISTRAL_API_KEY", "OPENROUTER_API_KEY", "MISTRAL", "Mistral"),
+}
+
+PRIMARY_ENV_KEYS: dict[str, str] = {
+    "Gemini": "GEMINI_API_KEY",
+    "Mistral": "MISTRAL_API_KEY",
+}
+
 # Gemini requests are deliberately bounded. The previous SDK silently retried for
 # up to ten minutes, which made a short provider outage look like a stuck conversion.
 GEMINI_TIMEOUT_SECONDS = 60
-GEMINI_MAX_ATTEMPTS = 2
-GEMINI_RETRY_DELAY_SECONDS = 2
+
+# Ordered by preference. When a model answers 503 "high demand" on every attempt,
+# the next one in the chain is tried. All are listed as Stable at
+# https://ai.google.dev/gemini-api/docs/models
+GEMINI_MODEL_CHAIN: tuple[str, ...] = (
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+)
+GEMINI_ATTEMPTS_PER_MODEL = 3
+# Exponential backoff between tries on the same model: ~2s, ~4s (with jitter).
+# A 503 is a capacity spike, so retrying within milliseconds just hits the same wall.
+GEMINI_BACKOFF_BASE_SECONDS = 2.0
+GEMINI_BACKOFF_MAX_SECONDS = 15.0
 MAX_OUTPUT_TOKENS = 2048
 
 # Equation images rarely need more than this resolution. Converting all input to
@@ -53,7 +82,7 @@ class AIModels:
     def __init__(self):
         self.models = {
             "Gemini": {
-                "name": "gemini-3.8-flash",
+                "name": GEMINI_MODEL_CHAIN[0],
                 "api_key": ""
             },
             "Mistral": {
@@ -68,35 +97,71 @@ class AIModels:
         self.load_api_keys()
 
     def save_api_keys(self):
-        """Save API keys to a local file."""
+        """Save API keys to the .env file."""
         try:
-            with open('api_keys.txt', 'w', encoding='utf-8') as file:
-                for model, data in self.models.items():
-                    file.write(f"{model}={data['api_key']}\n")
+            if not ENV_PATH.exists():
+                if ENV_EXAMPLE_PATH.exists():
+                    shutil.copy(ENV_EXAMPLE_PATH, ENV_PATH)
+                else:
+                    ENV_PATH.touch()
+
+            for model, data in self.models.items():
+                env_key = PRIMARY_ENV_KEYS.get(model)
+                if env_key:
+                    val = data.get("api_key", "").strip()
+                    set_key(str(ENV_PATH), env_key, val, quote_mode="never")
+                    os.environ[env_key] = val
         except Exception as error:
-            LOGGER.warning("Could not save API keys: %s", error)
+            LOGGER.warning("Could not save API keys to .env: %s", error)
 
     def load_api_keys(self):
-        """Load API keys from a local file."""
+        """Load API keys from .env file or environment variables."""
         try:
-            if not os.path.exists('api_keys.txt'):
-                return
-            with open('api_keys.txt', 'r', encoding='utf-8') as file:
-                for line in file:
-                    if '=' not in line:
-                        continue
-                    model, key = line.strip().split('=', 1)
-                    if model in self.models:
-                        self.models[model]['api_key'] = key
-        except Exception as error:
-            LOGGER.warning("Could not load API keys: %s", error)
+            if ENV_PATH.exists():
+                load_dotenv(dotenv_path=ENV_PATH, override=True)
+            else:
+                load_dotenv(override=True)
 
-    def update_api_key(self, model, key):
+            for model, env_vars in MODEL_ENV_VARS.items():
+                for var_name in env_vars:
+                    val = os.getenv(var_name, "").strip()
+                    if val:
+                        self.models[model]["api_key"] = val
+                        break
+
+            # Backward compatibility: if not in .env, migrate non-empty key from legacy api_keys.txt
+            legacy_file = Path(__file__).resolve().parent / "api_keys.txt"
+            if legacy_file.exists():
+                migrated = False
+                try:
+                    with open(legacy_file, "r", encoding="utf-8") as file:
+                        for line in file:
+                            if "=" not in line:
+                                continue
+                            m_name, k_val = line.strip().split("=", 1)
+                            m_name = m_name.strip()
+                            k_val = k_val.strip()
+                            if m_name in self.models and k_val and not self.models[m_name]["api_key"]:
+                                self.models[m_name]["api_key"] = k_val
+                                migrated = True
+                    if migrated:
+                        self.save_api_keys()
+                except Exception as leg_err:
+                    LOGGER.debug("Could not read legacy api_keys.txt: %s", leg_err)
+        except Exception as error:
+            LOGGER.warning("Could not load API keys from .env: %s", error)
+
+    def update_api_key(self, model: str, key: str):
         """Update a model key and discard any client created with the old key."""
         if model not in self.models:
             return
 
-        self.models[model]['api_key'] = key
+        cleaned_key = key.strip()
+        self.models[model]["api_key"] = cleaned_key
+        env_key = PRIMARY_ENV_KEYS.get(model)
+        if env_key:
+            os.environ[env_key] = cleaned_key
+
         if model == "Gemini":
             self._close_gemini_client()
         else:
@@ -186,6 +251,27 @@ class AIModels:
 
         module_name = error.__class__.__module__
         return module_name.startswith("httpx") or module_name.startswith("httpcore")
+
+    @staticmethod
+    def _backoff_delay(attempt: int) -> float:
+        """Exponential backoff with jitter so retries don't all land together."""
+        delay = min(
+            GEMINI_BACKOFF_MAX_SECONDS,
+            GEMINI_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+        )
+        return delay * random.uniform(0.75, 1.25)
+
+    @staticmethod
+    def _friendly_gemini_error(error: Exception | None) -> str:
+        """Turn Google's raw JSON-ish error text into one readable sentence."""
+        code = getattr(error, "code", None)
+        if code == 503:
+            return "Google reports the model is under high demand (HTTP 503)."
+        if code == 429:
+            return "Rate limit or quota reached (HTTP 429)."
+        if code in {500, 502, 504, 408}:
+            return f"Google's servers had a temporary problem (HTTP {code})."
+        return str(error) if error is not None else "Unknown error."
 
     @staticmethod
     def _resize_to_limit(image: Image.Image) -> Image.Image:
@@ -314,53 +400,87 @@ class AIModels:
 
         client = self._get_gemini_client()
         response = None
+        used_model = ""
+        total_attempts = 0
+        last_error: Exception | None = None
         api_started = perf_counter()
-        for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
-            self._emit_progress(
-                progress_callback,
-                f"Sending image to Gemini (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}, "
-                f"{GEMINI_TIMEOUT_SECONDS}s limit)…",
-            )
-            try:
-                response = client.models.generate_content(
-                    model=self.models["Gemini"]["name"],
-                    contents=[
-                        self._gemini_prompt(),
-                        genai_types.Part.from_bytes(
-                            data=image.data,
-                            mime_type=image.mime_type,
-                        ),
-                    ],
-                    config=genai_types.GenerateContentConfig(
-                        candidate_count=1,
-                        max_output_tokens=MAX_OUTPUT_TOKENS,
-                        response_mime_type="text/plain",
-                        # This request has no tools. Disable the SDK's default
-                        # AFC loop and its direct-generate warning.
-                        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
-                            disable=True,
-                        ),
-                        # Low thinking balances speed with difficult equation reading.
-                        thinking_config=genai_types.ThinkingConfig(
-                            thinking_level=genai_types.ThinkingLevel.LOW,
-                        ),
-                    ),
-                )
-                break
-            except Exception as error:
-                if attempt == GEMINI_MAX_ATTEMPTS or not self._is_retryable_gemini_error(error):
-                    elapsed = perf_counter() - api_started
-                    raise RuntimeError(
-                        f"Gemini request failed after {attempt} attempt(s) and {elapsed:.1f}s: {error}"
-                    ) from error
 
+        for model_name in GEMINI_MODEL_CHAIN:
+            for attempt in range(1, GEMINI_ATTEMPTS_PER_MODEL + 1):
+                total_attempts += 1
                 self._emit_progress(
                     progress_callback,
-                    "Gemini is temporarily unavailable; retrying once in "
-                    f"{GEMINI_RETRY_DELAY_SECONDS}s…",
+                    f"Sending image to {model_name} "
+                    f"(attempt {attempt}/{GEMINI_ATTEMPTS_PER_MODEL})…",
                 )
-                sleep(GEMINI_RETRY_DELAY_SECONDS)
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[
+                            self._gemini_prompt(),
+                            genai_types.Part.from_bytes(
+                                data=image.data,
+                                mime_type=image.mime_type,
+                            ),
+                        ],
+                        config=genai_types.GenerateContentConfig(
+                            candidate_count=1,
+                            max_output_tokens=MAX_OUTPUT_TOKENS,
+                            response_mime_type="text/plain",
+                            # This request has no tools. Disable the SDK's default
+                            # AFC loop and its direct-generate warning.
+                            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                                disable=True,
+                            ),
+                            # Low thinking balances speed with difficult equation reading.
+                            thinking_config=genai_types.ThinkingConfig(
+                                thinking_level=genai_types.ThinkingLevel.LOW,
+                            ),
+                        ),
+                    )
+                    used_model = model_name
+                    break
+                except Exception as error:
+                    last_error = error
+                    LOGGER.warning(
+                        "Gemini %s attempt %d/%d failed: %s",
+                        model_name, attempt, GEMINI_ATTEMPTS_PER_MODEL, error,
+                    )
 
+                    # Auth errors, bad requests, blocked content, etc. will not be
+                    # fixed by waiting or by switching models, so fail immediately.
+                    if not self._is_retryable_gemini_error(error):
+                        elapsed = perf_counter() - api_started
+                        raise RuntimeError(
+                            f"Gemini request failed on {model_name} after {elapsed:.1f}s: {error}"
+                        ) from error
+
+                    if attempt < GEMINI_ATTEMPTS_PER_MODEL:
+                        delay = self._backoff_delay(attempt)
+                        self._emit_progress(
+                            progress_callback,
+                            f"{model_name} is busy; retrying in {delay:.0f}s…",
+                        )
+                        sleep(delay)
+                    else:
+                        self._emit_progress(
+                            progress_callback,
+                            f"{model_name} is still busy; switching to the next model…",
+                        )
+
+            if response is not None:
+                break
+
+        if response is None:
+            elapsed = perf_counter() - api_started
+            raise RuntimeError(
+                f"All Gemini models are busy after {total_attempts} attempts and {elapsed:.1f}s. "
+                f"{self._friendly_gemini_error(last_error)} "
+                "This is usually temporary on Google's side. Please try again in a minute or two, "
+                "or switch to Mistral."
+            ) from last_error
+
+        attempt = total_attempts
         api_seconds = perf_counter() - api_started
         self._emit_progress(progress_callback, f"Gemini responded in {api_seconds:.1f}s; validating LaTeX…")
         parse_started = perf_counter()
@@ -370,7 +490,7 @@ class AIModels:
             raise RuntimeError("Gemini returned an empty response. Please try a clearer image.")
 
         timings: dict[str, float | int | str] = {
-            "provider": "Gemini",
+            "provider": f"Gemini ({used_model})",
             "prepare_seconds": prepare_seconds,
             "api_seconds": api_seconds,
             "parse_seconds": parse_seconds,

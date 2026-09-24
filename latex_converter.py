@@ -130,15 +130,19 @@ class ApiKeyDialog(QDialog):
     def __init__(self, model_name: str, current_key: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Set API Key - {model_name}")
-        self.setFixedSize(450, 190)
+        self.setFixedSize(480, 210)
         self.model_name = model_name
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
+        layout.setSpacing(12)
 
         title = QLabel(f"Enter API Key for {model_name}:")
         title.setStyleSheet("font-weight: bold; font-size: 14px;")
+
+        env_var_name = "GEMINI_API_KEY" if model_name == "Gemini" else "MISTRAL_API_KEY"
+        hint = QLabel(f"Key is loaded from and saved to your local .env file ({env_var_name})")
+        hint.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
 
         self.key_input = QLineEdit(current_key)
         self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -158,6 +162,7 @@ class ApiKeyDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
 
         layout.addWidget(title)
+        layout.addWidget(hint)
         layout.addWidget(self.key_input)
         layout.addLayout(btn_layout)
 
@@ -378,7 +383,7 @@ class LatexConverterApp(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_key = dialog.get_api_key()
             self.ai_models.update_api_key(model_name, new_key)
-            QMessageBox.information(self, "Success", f"API Key for {model_name} updated successfully.")
+            QMessageBox.information(self, "Success", f"API Key for {model_name} updated successfully in .env.")
 
     def set_loading_state(self, is_loading: bool, message: str = ""):
         self.convert_btn.setEnabled(not is_loading)
@@ -428,7 +433,13 @@ class LatexConverterApp(QMainWindow):
         )
 
     def on_conversion_error(self, error_msg: str):
-        QMessageBox.critical(self, "Error", f"Failed to convert image: {error_msg}")
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Critical)
+        dialog.setWindowTitle("Conversion failed")
+        dialog.setText("Could not convert the image.")
+        dialog.setInformativeText(error_msg)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.exec()
         self.status_label.setText("Conversion failed — see the error message for details.")
 
     def closeEvent(self, event):

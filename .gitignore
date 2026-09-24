@@ -30,6 +30,7 @@ api_keys.txt
 *.jpg
 *.jpeg
 !Hard Math Equation.png
+!Project.jpg
 
 # IDE & Operating System Artifacts
 .vscode/

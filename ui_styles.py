@@ -10,6 +10,7 @@ COLORS = {
     'accent_pressed': '#d90033',# Darker red for button press
     'text': '#e4e4e4',          # Primary light grey text
     'text_muted': '#8a8a93',    # Muted secondary text
+    'subtext': '#8a8a93',       # Subtext alias
     'border': '#2c3e50',        # Panel border color
     'border_focus': '#ff003c',  # Focus border color
     'success': '#00e676',       # Success status color
